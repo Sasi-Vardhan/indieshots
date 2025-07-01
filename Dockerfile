@@ -1,62 +1,59 @@
-# Multi-stage build for optimized production image
 FROM node:20-alpine AS builder
 
-# Set working directory
 WORKDIR /app
 
-# Copy package files
+RUN apk add --no-cache python3 make g++
+
 COPY package*.json ./
 
-# Install all dependencies (including devDependencies for build)
-RUN npm ci
+RUN npm ci --legacy-peer-deps
 
-# Copy source code
 COPY . .
 
-# Build the application
 RUN npm run build
+
+# Compile server with esbuild
+RUN npx esbuild server/index.ts \
+    --platform=node \
+    --packages=external \
+    --bundle \
+    --format=esm \
+    --outfile=dist/server.js \
+    --external:vite \
+    --external:@vitejs/plugin-react \
+    --external:@replit/vite-plugin-cartographer \
+    --external:@replit/vite-plugin-runtime-error-modal
 
 # Production stage
 FROM node:20-alpine AS production
 
-# Install dumb-init for proper signal handling
-RUN apk add --no-cache dumb-init
-
-# Create app user
-RUN addgroup -g 1001 -S nodejs
-RUN adduser -S nextjs -u 1001
-
-# Set working directory
 WORKDIR /app
 
-# Copy package files
+RUN apk add --no-cache dumb-init
+
 COPY package*.json ./
 
-# Install only production dependencies
-RUN npm ci --only=production && npm cache clean --force
+RUN npm ci --only=production --legacy-peer-deps && \
+    npm cache clean --force
 
-# Copy built application from builder stage
-COPY --from=builder --chown=nextjs:nodejs /app/dist ./dist
+COPY --from=builder /app/dist ./dist
+COPY shared ./shared
 
-# Copy necessary files
-COPY --chown=nextjs:nodejs shared ./shared
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nextjs -u 1001 && \
+    chown -R nextjs:nodejs /app
 
-# Switch to non-root user
 USER nextjs
 
-# Expose port (Cloud Run uses PORT environment variable)
-EXPOSE 8080
-
-# Set environment to production
 ENV NODE_ENV=production
 ENV PORT=8080
 
-# Health check
+EXPOSE 8080
+
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node -e "require('http').request('http://localhost:8080/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) }).end()"
+    CMD node -e "http.get('http://localhost:8080/api/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })" || exit 1
 
-# Use dumb-init to handle signals properly
 ENTRYPOINT ["dumb-init", "--"]
+# COPY .env.production .env
 
-# Start the application
-CMD ["npm", "start"]
+CMD ["node", "dist/server.js"]
