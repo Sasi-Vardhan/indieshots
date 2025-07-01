@@ -1,6 +1,30 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
-import { setupVite, serveStatic, log } from "./vite";
+import { log } from "./utils/utils"; // Updated import path
+import { serveStatic } from "./static"; // New import
+import dotenv from "dotenv";
+dotenv.config();
+
+const firebaseConfig = {
+  apiKey: process.env.FIREBASE_API_KEY,
+  authDomain: process.env.FIREBASE_AUTH_DOMAIN,
+  projectId: process.env.FIREBASE_PROJECT_ID,
+  storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.FIREBASE_APP_ID,
+};
+
+console.log("Firebase Config from Env:", firebaseConfig);
+
+
+
+// Only needed if you're using static frontend files
+import path from "path";
+import { fileURLToPath } from "url";
+
+// ES module fix
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 
@@ -39,49 +63,50 @@ app.use((req, res, next) => {
 
 (async () => {
   const server = await registerRoutes(app);
-  
-  // Start background cleanup job for scheduled account deletions
+
+  // Background jobs
   const { startCleanupJob } = await import('./jobs/cleanup-scheduled-deletions');
   startCleanupJob();
 
+  // Error handler
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
     const message = err.message || "Internal Server Error";
-
     res.status(status).json({ message });
     throw err;
   });
 
-  // importantly only setup vite in development and after
-  // setting up all the other routes so the catch-all route
-  // doesn't interfere with the other routes
-  if (app.get("env") === "development") {
-    await setupVite(app, server);
-  } else {
-    serveStatic(app);
-  }
+  // ✅ Serve static files (frontend)
+  serveStatic(app);
+  app.use(express.static(path.join(__dirname, "../dist/public")));
 
-  // Add health check endpoint for Cloud Run
-  app.get('/health', (_req, res) => {
+  // ✅ Handle frontend routing (like React SPA)
+  app.get("*", (req, res) => {
+    res.sendFile(path.join(__dirname, "../dist/public/index.html"));
+  });
+
+  // ✅ Health check
+  app.get("/health", (_req, res) => {
     res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
   });
 
-  // Port configuration for both Replit and Cloud Run
-  const port = process.env.PORT || 5000;
-  
+  // ✅ Root route (for Cloud Run test)
+  app.get("/", (_req: Request, res: Response) => {
+    res.send("✅ Indieshots API is running!");
+  });
+
+  const port = parseInt(process.env.PORT || '8080', 10);
+
   server.listen(port, "0.0.0.0", () => {
     log(`serving on port ${port}`);
-    
-    // Environment-specific logging
+
     if (process.env.NODE_ENV === 'production' && process.env.K_SERVICE) {
-      // Cloud Run environment
       log(`Cloud Run service: ${process.env.K_SERVICE}`);
       log(`Cloud Run revision: ${process.env.K_REVISION}`);
     } else if (process.env.REPL_SLUG) {
-      // Replit environment
       log(`External access: https://${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.replit.app`);
     }
-    
+
     log(`Local access: http://localhost:${port}`);
     log(`Server bound to all interfaces (0.0.0.0:${port})`);
   });
